@@ -8,626 +8,464 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body {
     width: 100%; height: 100%;
-    background: #1a1a1f;
+    background: #14141a;
     overflow: hidden;
     font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
     -webkit-tap-highlight-color: transparent;
     touch-action: none;
     user-select: none;
   }
-  #wrap {
-    position: fixed; inset: 0;
-    display: flex; align-items: center; justify-content: center;
-  }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
   #game { background: #000; display: block; touch-action: none; }
 </style>
 </head>
 <body>
-  <div id="wrap">
-    <canvas id="game"></canvas>
-  </div>
+  <div id="wrap"><canvas id="game"></canvas></div>
 
 <script>
 "use strict";
 
 // ====== 論理解像度（縦持ち基準） ======
-const W = 450;          // 論理幅
-const H = 800;          // 論理高さ
+const W = 450, H = 800;
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 
-// ====== レイアウト定数 ======
-// ストリート部（上）: 0 〜 STREET_BOTTOM
-const STREET_BOTTOM = H * 0.46;
-const HORIZON_Y = H * 0.06;          // 道が収束する地平線
-// プレイヤー（手前）基準ライン
-const PLAYER_LINE = STREET_BOTTOM - 14;
-// 3レーンの「最前面での」中心X
-const LANE_X = [W * 0.30, W * 0.50, W * 0.70];
-// 地平線での道幅（収束）
-const ROAD_NEAR_HALF = W * 0.42;     // 手前の道半幅
-const ROAD_FAR_HALF  = W * 0.05;     // 奥の道半幅
-
-// スマホ枠（下半分・中央寄せ）
+// ====== レイアウト：スマホを主役に（幅3/4・高さ2/3・中央） ======
 const PHONE = {
-  x: W * 0.13,
-  y: STREET_BOTTOM + 38,
-  w: W * 0.74,
-  h: H - (STREET_BOTTOM + 38) - 30
+  w: Math.round(W * 0.75),               // ≈338
+  h: Math.round(H * 0.667),              // ≈533
+  x: Math.round((W - W * 0.75) / 2),     // ≈56
+  y: 200                                 // 上に道の帯（0〜200）、下に親指余白
 };
+PHONE.bottom = PHONE.y + PHONE.h;        // ≈733
 // スマホ内ゲーム画面（ベゼル内側）
-const SCREEN = {
-  x: PHONE.x + 14,
-  y: PHONE.y + 40,
-  w: PHONE.w - 28,
-  h: PHONE.h - 80
-};
-const SCREEN_GROUND = SCREEN.y + SCREEN.h - 26; // スマホ内の地面
+const SCREEN = { x: PHONE.x + 16, y: PHONE.y + 50, w: PHONE.w - 32, h: PHONE.h - 100 };
+const SCREEN_GROUND = SCREEN.y + SCREEN.h - 30;
 
-// ====== チューニング定数 ======
-const BASE_SPEED = 1.0;              // 難易度係数の初期値
-const SPEED_RAMP = 0.018;           // 1秒ごとの上昇
-const PED_SPAWN_BASE = 1.35;        // 歩行者スポーン間隔(秒)
-const PHONE_SPAWN_BASE = 1.55;      // スマホ敵スポーン間隔(秒)
-const INVULN = 1.0;                 // 被弾後の無敵(秒)
-const LANE_MOVE_T = 0.12;           // レーン移動補間時間(秒)
-const GRAVITY = 2600;               // スマホ内重力(px/s^2)
-const JUMP_V = -780;                // ジャンプ初速
+// ====== 一人称・遠近投影パラメータ ======
+const HORIZON_Y = 26;            // 道の消失点Y（遠）
+const NEAR_Y = 210;              // 近接時の足元Y（スマホ上端=200付近に被さる）
+const SPREAD_FAR = 12;           // 遠でのレーン間隔
+const SPREAD_NEAR = 200;         // 近でのレーン間隔（左右の隙間にすり抜ける）
+const PED_H = 200;               // 歩行者の近接時ピクセル身長
+function laneSpread(p) { return SPREAD_FAR + (SPREAD_NEAR - SPREAD_FAR) * p; }
+function projY(p) { return HORIZON_Y + (NEAR_Y - HORIZON_Y) * p; }
+function projX(absLane, p, camLane) { return W / 2 + (absLane - camLane) * laneSpread(p); }
+function pedScale(p) { return 0.14 + 0.86 * p; }
+
+// ====== チューニング ======
+const BASE_SPEED = 1.0, SPEED_RAMP = 0.018;
+const PED_SPAWN_BASE = 1.35, PHONE_SPAWN_BASE = 1.55;
+const INVULN = 1.0, LANE_MOVE_T = 0.12;
+const GRAVITY = 2600, JUMP_V = -780;
+
+// ====== アセット差し替え層（assets/ にPNGを置けば自動で使用、無ければ図形） ======
+const ASSET_MANIFEST = [
+  { key: "pedestrian", src: "assets/pedestrian.png" }, // 足元中央アンカー / 縦長
+  { key: "runner",     src: "assets/runner.png" },     // 足元中央アンカー
+  { key: "enemy",      src: "assets/enemy.png" },       // 足元中央アンカー
+  { key: "phone",      src: "assets/phone_frame.png" }, // PHONE矩形に丸ごと
+  { key: "hand_l",     src: "assets/hand_l.png" },
+  { key: "hand_r",     src: "assets/hand_r.png" },
+  { key: "buildings",  src: "assets/buildings.png" }    // 横方向タイル想定
+];
+const bank = {};
+for (const a of ASSET_MANIFEST) { const img = new Image(); img.src = a.src; bank[a.key] = img; }
+function imgReady(k) { const i = bank[k]; return !!(i && i.complete && i.naturalWidth > 0); }
+// 足元中央アンカーで画像を高さhに合わせ描画。未ロードなら fallback() を呼ぶ。
+function sprite(key, cx, footY, h, fallback) {
+  if (imgReady(key)) {
+    const i = bank[key], w = h * (i.naturalWidth / i.naturalHeight);
+    ctx.drawImage(i, cx - w / 2, footY - h, w, h);
+  } else if (fallback) { fallback(); }
+}
 
 // ====== ゲーム状態 ======
-let gameState = "title";   // title / playing / gameover
-let time = 0;              // 経過秒
-let speed = BASE_SPEED;
-let score = 0;
-let hp = 3;
-const MAX_HP = 3;
+let gameState = "title", time = 0, speed = BASE_SPEED, score = 0;
+const MAX_HP = 3; let hp = MAX_HP;
 
-const player = { lane: 1, x: LANE_X[1], pedInvuln: 0 };
-let pedestrians = [];     // {lane, prog(0=奥,1=手前)}
-let pedSpawnTimer = 0;
-
+const player = { lane: 1, laneF: 1, pedInvuln: 0 };  // laneF=描画用の補間カメラ
+let pedestrians = [], pedSpawnTimer = 0;
 const runner = { y: SCREEN_GROUND, vy: 0, onGround: true, invuln: 0, runPhase: 0 };
-let phoneEnemies = [];    // {x, type}  xはSCREEN内座標
-let phoneSpawnTimer = 0;
+let phoneEnemies = [], phoneSpawnTimer = 0;
+let hitFlash = 0;
 
-let lastHitFlash = 0;     // 画面全体の被弾フラッシュ
-
-// ====== リセット ======
 function resetGame() {
   time = 0; speed = BASE_SPEED; score = 0; hp = MAX_HP;
-  player.lane = 1; player.x = LANE_X[1]; player.pedInvuln = 0;
-  pedestrians = []; pedSpawnTimer = 0.6;
+  player.lane = 1; player.laneF = 1; player.pedInvuln = 0;
+  pedestrians = []; pedSpawnTimer = 0.7;
   runner.y = SCREEN_GROUND; runner.vy = 0; runner.onGround = true; runner.invuln = 0; runner.runPhase = 0;
-  phoneEnemies = []; phoneSpawnTimer = 1.0;
-  lastHitFlash = 0;
+  phoneEnemies = []; phoneSpawnTimer = 1.0; hitFlash = 0;
 }
 
 // ====== 入力 ======
 function moveLeft()  { if (player.lane > 0) player.lane--; }
 function moveRight() { if (player.lane < 2) player.lane++; }
-function jump() {
-  if (runner.onGround) { runner.vy = JUMP_V; runner.onGround = false; }
-}
+function jump() { if (runner.onGround) { runner.vy = JUMP_V; runner.onGround = false; } }
 
 function handlePress(cx, cy) {
-  if (gameState === "title") { resetGame(); gameState = "playing"; return; }
-  if (gameState === "gameover") { resetGame(); gameState = "playing"; return; }
-  // playing: 領域で振り分け
-  const inPhone = cx >= PHONE.x && cx <= PHONE.x + PHONE.w &&
-                  cy >= PHONE.y && cy <= PHONE.y + PHONE.h;
-  if (inPhone) {
-    jump();
-  } else {
-    if (cx < W / 2) moveLeft(); else moveRight();
-  }
+  if (gameState !== "playing") { resetGame(); gameState = "playing"; return; }
+  const inPhone = cx >= PHONE.x && cx <= PHONE.x + PHONE.w && cy >= PHONE.y && cy <= PHONE.bottom;
+  if (inPhone) jump();                          // 枠の内側＝ジャンプ
+  else if (cx < W / 2) moveLeft();              // 枠の外・左＝左へ
+  else moveRight();                             // 枠の外・右＝右へ
 }
-
-// 画面座標→論理座標
 function toLogical(clientX, clientY) {
   const r = canvas.getBoundingClientRect();
-  return {
-    x: (clientX - r.left) / r.width * W,
-    y: (clientY - r.top) / r.height * H
-  };
+  return { x: (clientX - r.left) / r.width * W, y: (clientY - r.top) / r.height * H };
 }
-
 canvas.addEventListener("pointerdown", (e) => {
   e.preventDefault();
   const p = toLogical(e.clientX, e.clientY);
   handlePress(p.x, p.y);
 }, { passive: false });
-
 window.addEventListener("keydown", (e) => {
   if (e.repeat) return;
   if (gameState !== "playing") {
-    if (e.code === "Space" || e.code === "Enter" || e.code === "ArrowUp") {
-      resetGame(); gameState = "playing"; e.preventDefault();
-    }
+    if (["Space", "Enter", "ArrowUp"].includes(e.code)) { resetGame(); gameState = "playing"; e.preventDefault(); }
     return;
   }
   switch (e.code) {
-    case "ArrowLeft":  case "KeyA": moveLeft(); e.preventDefault(); break;
+    case "ArrowLeft": case "KeyA": moveLeft(); e.preventDefault(); break;
     case "ArrowRight": case "KeyD": moveRight(); e.preventDefault(); break;
     case "Space": case "ArrowUp": case "KeyW": jump(); e.preventDefault(); break;
   }
 });
 
-// ====== 衝突時 ======
-function takeHit(source) {
-  // source: "ped" or "phone"。共通HPを削る。対象タスクのみ短時間無敵。
-  hp--;
-  lastHitFlash = 0.35;
-  if (source === "ped") player.pedInvuln = INVULN;
-  else runner.invuln = INVULN;
+function takeHit(src) {
+  hp--; hitFlash = 0.35;
+  if (src === "ped") player.pedInvuln = INVULN; else runner.invuln = INVULN;
   if (hp <= 0) { hp = 0; gameState = "gameover"; }
 }
 
 // ====== 更新 ======
 function update(dt) {
   if (gameState !== "playing") return;
-
   time += dt;
   speed = BASE_SPEED + time * SPEED_RAMP;
   score += dt * 100 * speed;
-
   if (player.pedInvuln > 0) player.pedInvuln -= dt;
   if (runner.invuln > 0) runner.invuln -= dt;
-  if (lastHitFlash > 0) lastHitFlash -= dt;
+  if (hitFlash > 0) hitFlash -= dt;
 
-  // --- プレイヤー横移動（補間） ---
-  const targetX = LANE_X[player.lane];
-  player.x += (targetX - player.x) * Math.min(1, dt / LANE_MOVE_T);
+  // カメラ（自分の横位置）を目標レーンへ補間
+  player.laneF += (player.lane - player.laneF) * Math.min(1, dt / LANE_MOVE_T);
 
-  // --- 歩行者 ---
+  // 歩行者
   pedSpawnTimer -= dt;
   if (pedSpawnTimer <= 0) {
     pedSpawnTimer = Math.max(0.45, PED_SPAWN_BASE / speed) * (0.7 + Math.random() * 0.6);
     spawnPedestrians();
   }
-  const pedSpeed = 0.42 * speed; // prog/秒
+  const pedSpeed = 0.40 * speed;
   for (const p of pedestrians) {
     p.prog += pedSpeed * dt;
-    // 衝突: 手前付近で同レーン
-    if (!p.hit && p.prog >= 0.86 && p.lane === player.lane && player.pedInvuln <= 0) {
-      p.hit = true;
-      takeHit("ped");
-    }
+    if (!p.hit && p.prog >= 0.86 && p.lane === player.lane && player.pedInvuln <= 0) { p.hit = true; takeHit("ped"); }
   }
-  pedestrians = pedestrians.filter(p => p.prog < 1.15);
+  pedestrians = pedestrians.filter(p => p.prog < 1.2);
 
-  // --- スマホ内ランナー ---
+  // スマホ内ランナー
   runner.runPhase += dt * 12 * speed;
   runner.vy += GRAVITY * dt;
   runner.y += runner.vy * dt;
-  if (runner.y >= SCREEN_GROUND) {
-    runner.y = SCREEN_GROUND; runner.vy = 0; runner.onGround = true;
-  }
+  if (runner.y >= SCREEN_GROUND) { runner.y = SCREEN_GROUND; runner.vy = 0; runner.onGround = true; }
 
-  // --- スマホ内の敵 ---
+  // スマホ内の敵
   phoneSpawnTimer -= dt;
   if (phoneSpawnTimer <= 0) {
     phoneSpawnTimer = Math.max(0.55, PHONE_SPAWN_BASE / speed) * (0.7 + Math.random() * 0.7);
-    phoneEnemies.push({ x: SCREEN.x + SCREEN.w + 20, h: 20 + Math.random() * 14 });
+    phoneEnemies.push({ x: SCREEN.x + SCREEN.w + 20, h: 20 + Math.random() * 14, hit: false });
   }
   const enemySpeed = (150 + 40 * speed) * speed;
   const runnerX = SCREEN.x + SCREEN.w * 0.28;
-  const runnerHalf = 11;
   for (const en of phoneEnemies) {
     en.x -= enemySpeed * dt;
-    if (!en.hit && Math.abs(en.x - runnerX) < runnerHalf + 9) {
-      // ランナーの足元が敵の高さより上にいれば回避
-      const runnerFoot = runner.y;
-      if (runnerFoot > SCREEN_GROUND - en.h && runner.invuln <= 0) {
-        en.hit = true;
-        takeHit("phone");
-      }
+    if (!en.hit && Math.abs(en.x - runnerX) < 20 && runner.y > SCREEN_GROUND - en.h && runner.invuln <= 0) {
+      en.hit = true; takeHit("phone");
     }
   }
   phoneEnemies = phoneEnemies.filter(en => en.x > SCREEN.x - 30);
 }
 
 function spawnPedestrians() {
-  // 1〜2レーンを塞ぐ（全レーン同時は塞がない）
-  const count = Math.random() < 0.35 && speed > 1.4 ? 2 : 1;
+  const count = (Math.random() < 0.32 && speed > 1.4) ? 2 : 1;
   const lanes = [0, 1, 2];
-  for (let i = lanes.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [lanes[i], lanes[j]] = [lanes[j], lanes[i]];
-  }
-  for (let i = 0; i < count; i++) {
-    pedestrians.push({ lane: lanes[i], prog: 0, hit: false, sway: Math.random() * Math.PI * 2 });
-  }
+  for (let i = lanes.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [lanes[i], lanes[j]] = [lanes[j], lanes[i]]; }
+  for (let i = 0; i < count; i++) pedestrians.push({ lane: lanes[i], prog: 0, hit: false, color: PED_COLORS[(Math.random() * PED_COLORS.length) | 0], sway: Math.random() * 6.28 });
 }
-
-// ====== 描画ヘルパ ======
-// prog(0奥..1手前) と lane から画面上の x,y,scale を返す
-function pedTransform(lane, prog) {
-  const y = HORIZON_Y + (PLAYER_LINE - HORIZON_Y) * prog;
-  const t = prog; // 0..1
-  const halfNow = ROAD_FAR_HALF + (ROAD_NEAR_HALF - ROAD_FAR_HALF) * t;
-  // レーン中心を-1,0,1で配置
-  const laneOffset = (lane - 1);
-  const cx = W / 2 + laneOffset * halfNow * 0.62;
-  const scale = 0.18 + 0.82 * t; // 奥は小さい
-  return { x: cx, y, scale };
-}
+const PED_COLORS = ["#d96a5a", "#5a8fd9", "#6ab86a", "#c79a3e", "#a96ad9", "#d96aa6"];
 
 // ====== 描画 ======
 function draw() {
   ctx.clearRect(0, 0, W, H);
-
-  drawStreet();
-  drawPedestrians();
-  drawPlayerBackView();
-  drawPhone();
+  drawWorld();        // 空・ビル・道（背景）
+  drawPedestrians();  // 歩行者（スマホの後ろ＝接近して縁にちらつく）
+  drawPhone();        // スマホ本体＋中のゲーム＋手（前面）
+  drawVignette();
   drawHUD();
-
-  if (lastHitFlash > 0) {
-    ctx.fillStyle = `rgba(255,40,40,${0.4 * (lastHitFlash / 0.35)})`;
-    ctx.fillRect(0, 0, W, H);
-  }
-
+  if (hitFlash > 0) { ctx.fillStyle = `rgba(255,40,40,${0.4 * (hitFlash / 0.35)})`; ctx.fillRect(0, 0, W, H); }
   if (gameState === "title") drawTitle();
   else if (gameState === "gameover") drawGameOver();
 }
 
-function drawStreet() {
-  // 空〜ビル
-  const sky = ctx.createLinearGradient(0, 0, 0, STREET_BOTTOM);
-  sky.addColorStop(0, "#2a2f4a");
-  sky.addColorStop(1, "#4a5278");
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, W, STREET_BOTTOM);
+function drawWorld() {
+  // 空
+  const sky = ctx.createLinearGradient(0, 0, 0, NEAR_Y + 40);
+  sky.addColorStop(0, "#2b3357"); sky.addColorStop(1, "#6b76a6");
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, NEAR_Y + 60);
 
-  // 道（台形）
-  ctx.fillStyle = "#3a3d44";
-  ctx.beginPath();
-  ctx.moveTo(W / 2 - ROAD_FAR_HALF, HORIZON_Y);
-  ctx.lineTo(W / 2 + ROAD_FAR_HALF, HORIZON_Y);
-  ctx.lineTo(W / 2 + ROAD_NEAR_HALF, PLAYER_LINE);
-  ctx.lineTo(W / 2 - ROAD_NEAR_HALF, PLAYER_LINE);
-  ctx.closePath();
-  ctx.fill();
-
-  // レーン区切り線（破線・遠近、スクロール）
-  ctx.strokeStyle = "rgba(255,255,255,0.35)";
-  ctx.lineWidth = 2;
-  for (let l = 0; l <= 3; l++) {
-    const off = (l - 1.5) / 1.5; // -1..1
-    ctx.beginPath();
-    ctx.moveTo(W / 2 + off * ROAD_FAR_HALF, HORIZON_Y);
-    ctx.lineTo(W / 2 + off * ROAD_NEAR_HALF, PLAYER_LINE);
-    ctx.stroke();
+  // ビル（差し替え可）。fallbackは簡易シルエット
+  if (imgReady("buildings")) {
+    const i = bank["buildings"], h = 120, w = h * (i.naturalWidth / i.naturalHeight);
+    const off = (time * 8 * speed) % w;
+    for (let x = -off; x < W; x += w) ctx.drawImage(i, x, HORIZON_Y - 10, w, h);
+  } else {
+    drawBuildingsShape();
   }
-  // 横の流れる線（速度感）
-  const scroll = (time * 0.5 * speed) % 1;
+
+  // 道（消失点→手前へ。カメラ=player.laneFで左右パララックス）
+  const cam = player.laneF;
+  const lx0 = projX(-0.6, 0, cam), rx0 = projX(2.6, 0, cam);
+  const lx1 = projX(-0.6, 1, cam), rx1 = projX(2.6, 1, cam);
+  ctx.fillStyle = "#3a3d46";
+  ctx.beginPath();
+  ctx.moveTo(lx0, HORIZON_Y); ctx.lineTo(rx0, HORIZON_Y);
+  ctx.lineTo(rx1, H); ctx.lineTo(lx1, H); ctx.closePath(); ctx.fill();
+
+  // レーン境界（破線・遠近）
+  ctx.strokeStyle = "rgba(255,255,255,0.30)"; ctx.lineWidth = 2;
+  for (const a of [0.5, 1.5]) {
+    ctx.beginPath(); ctx.moveTo(projX(a, 0, cam), HORIZON_Y); ctx.lineTo(projX(a, 1, cam), H); ctx.stroke();
+  }
+  // 路面の流れる横線（速度感）
   ctx.strokeStyle = "rgba(255,235,150,0.5)";
-  for (let i = 0; i < 6; i++) {
-    const prog = ((i / 6) + scroll) % 1;
-    const half = ROAD_FAR_HALF + (ROAD_NEAR_HALF - ROAD_FAR_HALF) * prog;
-    const y = HORIZON_Y + (PLAYER_LINE - HORIZON_Y) * prog;
-    ctx.lineWidth = 1 + 2 * prog;
-    ctx.beginPath();
-    ctx.moveTo(W / 2 - half * 0.04, y);
-    ctx.lineTo(W / 2 + half * 0.04, y);
-    ctx.stroke();
+  const scroll = (time * 0.55 * speed) % 1;
+  for (let i = 0; i < 7; i++) {
+    const p = ((i / 7) + scroll) % 1, y = projY(p), half = laneSpread(p) * 0.08;
+    ctx.lineWidth = 1 + 3 * p;
+    ctx.beginPath(); ctx.moveTo(projX(1, p, cam) - half, y); ctx.lineTo(projX(1, p, cam) + half, y); ctx.stroke();
+  }
+}
+
+function drawBuildingsShape() {
+  const cam = player.laneF;
+  // 道の左右に沿って後退するビル群
+  ctx.fillStyle = "#3b4168";
+  const blocks = 7;
+  for (let s = -1; s <= 1; s += 2) {
+    for (let i = 0; i < blocks; i++) {
+      const p = i / blocks;
+      const edge = projX(s > 0 ? 2.6 : -0.6, p, cam);
+      const w = 22 + 30 * (1 - p), bh = 30 + 70 * (1 - p) + ((i * 37) % 40);
+      const y = projY(p);
+      ctx.fillStyle = i % 2 ? "#39406a" : "#444b78";
+      ctx.fillRect(edge + (s > 0 ? 0 : -w), y - bh, w, bh);
+      // 窓
+      ctx.fillStyle = "rgba(255,230,150,0.25)";
+      for (let wy = y - bh + 6; wy < y - 6; wy += 12) ctx.fillRect(edge + (s > 0 ? 4 : -w + 4), wy, w - 8, 4);
+    }
   }
 }
 
 function drawPedestrians() {
-  // 奥から手前の順（progが小さい順）に描画
-  const sorted = [...pedestrians].sort((a, b) => a.prog - b.prog);
+  const cam = player.laneF;
+  const sorted = [...pedestrians].sort((a, b) => a.prog - b.prog); // 奥→手前
   for (const p of sorted) {
-    const tr = pedTransform(p.lane, p.prog);
-    drawPerson(tr.x, tr.y, tr.scale, "#d96a5a", true, p.sway + time * 6);
+    const blink = p.hit && Math.floor(time * 20) % 2 === 0;
+    if (blink) continue;
+    const x = projX(p.lane, p.prog, cam), y = projY(p.prog), h = PED_H * pedScale(p.prog);
+    sprite("pedestrian", x, y, h, () => drawPersonShape(x, y, h, p.color, p.sway + time * 7));
   }
 }
 
-// 後ろ姿のプレイヤー（手前・大きめ）
-function drawPlayerBackView() {
-  const blink = player.pedInvuln > 0 && Math.floor(time * 12) % 2 === 0;
-  if (blink) return;
-  drawPerson(player.x, PLAYER_LINE + 8, 1.15, "#4aa3e0", false, time * 10, true);
-}
-
-// 人物（簡易）。facing: true=こちら向き(顔), false=後ろ姿
-function drawPerson(x, y, scale, color, facing, phase, isPlayer) {
-  const bodyH = 46 * scale;
-  const bodyW = 18 * scale;
-  const headR = 8 * scale;
-  const legSwing = Math.sin(phase) * 5 * scale;
-
-  ctx.save();
-  ctx.translate(x, y);
-
+// 足元(x,footY)・身長h の人物（fallback図形）
+function drawPersonShape(x, footY, h, color, phase) {
+  const headR = h * 0.11, bodyW = h * 0.30, bodyTop = footY - h, hipY = footY - h * 0.42;
+  const legSwing = Math.sin(phase) * h * 0.06;
+  ctx.save(); ctx.translate(x, 0);
   // 影
-  ctx.fillStyle = "rgba(0,0,0,0.25)";
-  ctx.beginPath();
-  ctx.ellipse(0, 0, bodyW * 0.9, 4 * scale, 0, 0, Math.PI * 2);
-  ctx.fill();
-
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.beginPath(); ctx.ellipse(0, footY, bodyW * 0.7, h * 0.03, 0, 0, 6.28); ctx.fill();
   // 脚
-  ctx.strokeStyle = facing ? "#33384a" : "#2c3550";
-  ctx.lineWidth = 5 * scale;
-  ctx.lineCap = "round";
+  ctx.strokeStyle = "#2c3550"; ctx.lineWidth = h * 0.08; ctx.lineCap = "round";
   ctx.beginPath();
-  ctx.moveTo(-bodyW * 0.25, -bodyH * 0.45);
-  ctx.lineTo(-bodyW * 0.25 + legSwing, 0);
-  ctx.moveTo(bodyW * 0.25, -bodyH * 0.45);
-  ctx.lineTo(bodyW * 0.25 - legSwing, 0);
+  ctx.moveTo(-bodyW * 0.22, hipY); ctx.lineTo(-bodyW * 0.22 + legSwing, footY);
+  ctx.moveTo(bodyW * 0.22, hipY); ctx.lineTo(bodyW * 0.22 - legSwing, footY);
   ctx.stroke();
-
-  // 胴体
-  ctx.fillStyle = color;
-  roundRect(-bodyW / 2, -bodyH, bodyW, bodyH * 0.62, 5 * scale);
-  ctx.fill();
-
+  // 胴
+  ctx.fillStyle = color; roundRectP(-bodyW / 2, bodyTop + headR * 1.6, bodyW, hipY - (bodyTop + headR * 1.6), h * 0.06); ctx.fill();
   // 頭
-  ctx.fillStyle = "#f0c9a0";
-  ctx.beginPath();
-  ctx.arc(0, -bodyH - headR * 0.4, headR, 0, Math.PI * 2);
-  ctx.fill();
-
-  // 髪 / 後ろ姿
-  ctx.fillStyle = "#3a2e26";
-  if (facing) {
-    ctx.beginPath();
-    ctx.arc(0, -bodyH - headR * 0.7, headR, Math.PI, Math.PI * 2);
-    ctx.fill();
-  } else {
-    ctx.beginPath();
-    ctx.arc(0, -bodyH - headR * 0.4, headR * 0.95, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // プレイヤーは手にスマホを持つ仕草（腕を前に）
-  if (isPlayer) {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 5 * scale;
-    ctx.beginPath();
-    ctx.moveTo(-bodyW * 0.4, -bodyH * 0.55);
-    ctx.lineTo(-bodyW * 0.15, -bodyH * 0.3);
-    ctx.moveTo(bodyW * 0.4, -bodyH * 0.55);
-    ctx.lineTo(bodyW * 0.15, -bodyH * 0.3);
-    ctx.stroke();
-  }
-
+  ctx.fillStyle = "#f0c9a0"; ctx.beginPath(); ctx.arc(0, bodyTop + headR, headR, 0, 6.28); ctx.fill();
+  // 髪
+  ctx.fillStyle = "#3a2e26"; ctx.beginPath(); ctx.arc(0, bodyTop + headR, headR, Math.PI, 6.28); ctx.fill();
   ctx.restore();
 }
 
 function drawPhone() {
-  // スマホ本体
-  ctx.fillStyle = "#0f0f12";
-  roundRect(PHONE.x, PHONE.y, PHONE.w, PHONE.h, 26);
-  ctx.fill();
-  ctx.strokeStyle = "#34343c";
-  ctx.lineWidth = 3;
-  roundRect(PHONE.x, PHONE.y, PHONE.w, PHONE.h, 26);
-  ctx.stroke();
+  // 本体（差し替え可）
+  if (imgReady("phone")) {
+    ctx.drawImage(bank["phone"], PHONE.x, PHONE.y, PHONE.w, PHONE.h);
+  } else {
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,0.45)"; ctx.shadowBlur = 18; ctx.shadowOffsetY = 6;
+    ctx.fillStyle = "#101015"; roundRectP(PHONE.x, PHONE.y, PHONE.w, PHONE.h, 30); ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = "#3a3a44"; ctx.lineWidth = 3; roundRectP(PHONE.x, PHONE.y, PHONE.w, PHONE.h, 30); ctx.stroke();
+    // ノッチ
+    ctx.fillStyle = "#000"; roundRectP(PHONE.x + PHONE.w / 2 - 34, PHONE.y + 14, 68, 18, 9); ctx.fill();
+  }
 
-  // スピーカー
-  ctx.fillStyle = "#2a2a30";
-  roundRect(PHONE.x + PHONE.w / 2 - 22, PHONE.y + 18, 44, 6, 3);
-  ctx.fill();
+  // ステータスバー
+  ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.font = "bold 12px sans-serif";
+  ctx.textAlign = "left"; ctx.fillText("9:41", SCREEN.x + 4, SCREEN.y - 8);
+  ctx.textAlign = "right"; ctx.fillText("100% ▮", SCREEN.x + SCREEN.w - 4, SCREEN.y - 8);
+  ctx.textAlign = "left";
 
-  // 画面（クリップして中のゲームを描く）
-  ctx.save();
-  roundRect(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h, 8);
-  ctx.clip();
-  drawPhoneGame();
-  ctx.restore();
+  // 画面内ゲーム
+  ctx.save(); roundRectP(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h, 10); ctx.clip(); drawPhoneGame(); ctx.restore();
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 2; roundRectP(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h, 10); ctx.stroke();
 
-  // 画面枠
-  ctx.strokeStyle = "#000";
-  ctx.lineWidth = 2;
-  roundRect(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h, 8);
-  ctx.stroke();
+  // 画面の反射（うっすら）
+  ctx.save(); roundRectP(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h, 10); ctx.clip();
+  const gl = ctx.createLinearGradient(SCREEN.x, SCREEN.y, SCREEN.x + SCREEN.w, SCREEN.y + SCREEN.h * 0.5);
+  gl.addColorStop(0, "rgba(255,255,255,0.10)"); gl.addColorStop(0.5, "rgba(255,255,255,0)");
+  ctx.fillStyle = gl; ctx.fillRect(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h); ctx.restore();
 
-  // 構える両手
   drawHands();
 }
 
 function drawPhoneGame() {
-  // 背景（横スクロール空）
   const g = ctx.createLinearGradient(0, SCREEN.y, 0, SCREEN.y + SCREEN.h);
-  g.addColorStop(0, "#bfe8ff");
-  g.addColorStop(1, "#e9f7ff");
-  ctx.fillStyle = g;
-  ctx.fillRect(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h);
-
-  // 流れる雲
-  ctx.fillStyle = "rgba(255,255,255,0.8)";
+  g.addColorStop(0, "#bfe8ff"); g.addColorStop(1, "#eaf7ff");
+  ctx.fillStyle = g; ctx.fillRect(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h);
+  // 雲
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
   for (let i = 0; i < 3; i++) {
     const cx = SCREEN.x + ((SCREEN.w + 60) - ((time * 30 * speed + i * 90) % (SCREEN.w + 80)));
-    const cy = SCREEN.y + 24 + i * 16;
-    cloud(cx, cy, 12);
+    cloud(cx, SCREEN.y + 26 + i * 18, 12);
   }
-
   // 地面
-  ctx.fillStyle = "#6dbf4a";
-  ctx.fillRect(SCREEN.x, SCREEN_GROUND + 2, SCREEN.w, SCREEN.y + SCREEN.h - SCREEN_GROUND);
-  ctx.fillStyle = "#4f9e36";
-  ctx.fillRect(SCREEN.x, SCREEN_GROUND + 2, SCREEN.w, 4);
-  // 地面の流れる縞
+  ctx.fillStyle = "#6dbf4a"; ctx.fillRect(SCREEN.x, SCREEN_GROUND + 2, SCREEN.w, SCREEN.y + SCREEN.h - SCREEN_GROUND);
+  ctx.fillStyle = "#4f9e36"; ctx.fillRect(SCREEN.x, SCREEN_GROUND + 2, SCREEN.w, 4);
   ctx.fillStyle = "rgba(0,0,0,0.08)";
   const gs = (time * (150 + 40 * speed) * speed) % 30;
-  for (let x = SCREEN.x - gs; x < SCREEN.x + SCREEN.w; x += 30) {
-    ctx.fillRect(x, SCREEN_GROUND + 6, 14, 3);
-  }
-
+  for (let x = SCREEN.x - gs; x < SCREEN.x + SCREEN.w; x += 30) ctx.fillRect(x, SCREEN_GROUND + 6, 14, 3);
   // 敵
   for (const en of phoneEnemies) {
-    if (en.x < SCREEN.x - 20 || en.x > SCREEN.x + SCREEN.w + 20) continue;
-    ctx.fillStyle = "#c0392b";
-    roundRect(en.x - 9, SCREEN_GROUND - en.h, 18, en.h, 3);
-    ctx.fill();
-    // 目
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(en.x - 5, SCREEN_GROUND - en.h + 4, 4, 4);
-    ctx.fillRect(en.x + 2, SCREEN_GROUND - en.h + 4, 4, 4);
+    sprite("enemy", en.x, SCREEN_GROUND, en.h, () => {
+      ctx.fillStyle = "#c0392b"; roundRectP(en.x - 9, SCREEN_GROUND - en.h, 18, en.h, 3); ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.fillRect(en.x - 5, SCREEN_GROUND - en.h + 4, 4, 4); ctx.fillRect(en.x + 2, SCREEN_GROUND - en.h + 4, 4, 4);
+    });
   }
-
   // ランナー
   const blink = runner.invuln > 0 && Math.floor(time * 12) % 2 === 0;
   if (!blink) {
     const rx = SCREEN.x + SCREEN.w * 0.28;
-    drawRunner(rx, runner.y);
+    sprite("runner", rx, runner.y, 34, () => drawRunnerShape(rx, runner.y));
   }
 }
 
-function drawRunner(x, y) {
+function drawRunnerShape(x, y) {
   const legSwing = runner.onGround ? Math.sin(runner.runPhase) * 5 : 3;
-  ctx.save();
-  ctx.translate(x, y);
-  // 脚
-  ctx.strokeStyle = "#222";
-  ctx.lineWidth = 4; ctx.lineCap = "round";
-  ctx.beginPath();
-  ctx.moveTo(-3, -14); ctx.lineTo(-3 + legSwing, 0);
-  ctx.moveTo(3, -14); ctx.lineTo(3 - legSwing, 0);
-  ctx.stroke();
-  // 胴
-  ctx.fillStyle = "#ff7043";
-  roundRect(-8, -28, 16, 16, 4); ctx.fill();
-  // 頭
-  ctx.fillStyle = "#ffd9a0";
-  ctx.beginPath(); ctx.arc(0, -32, 7, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = "#3a2e26";
-  ctx.beginPath(); ctx.arc(0, -34, 7, Math.PI, Math.PI * 2); ctx.fill();
+  ctx.save(); ctx.translate(x, y);
+  ctx.strokeStyle = "#222"; ctx.lineWidth = 4; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(-3, -14); ctx.lineTo(-3 + legSwing, 0); ctx.moveTo(3, -14); ctx.lineTo(3 - legSwing, 0); ctx.stroke();
+  ctx.fillStyle = "#ff7043"; roundRectP(-8, -28, 16, 16, 4); ctx.fill();
+  ctx.fillStyle = "#ffd9a0"; ctx.beginPath(); ctx.arc(0, -32, 7, 0, 6.28); ctx.fill();
+  ctx.fillStyle = "#3a2e26"; ctx.beginPath(); ctx.arc(0, -34, 7, Math.PI, 6.28); ctx.fill();
   ctx.restore();
 }
 
 function drawHands() {
-  // スマホ下の両端から親指
-  ctx.fillStyle = "#e8b48c";
-  ctx.strokeStyle = "#c8946c";
-  ctx.lineWidth = 2;
-  // 左手
-  ctx.beginPath();
-  ctx.ellipse(PHONE.x + 6, PHONE.y + PHONE.h - 60, 22, 46, -0.25, 0, Math.PI * 2);
-  ctx.fill(); ctx.stroke();
-  // 右手
-  ctx.beginPath();
-  ctx.ellipse(PHONE.x + PHONE.w - 6, PHONE.y + PHONE.h - 60, 22, 46, 0.25, 0, Math.PI * 2);
-  ctx.fill(); ctx.stroke();
+  const ly = PHONE.bottom - 70, lx = PHONE.x + 4, rx = PHONE.x + PHONE.w - 4;
+  if (imgReady("hand_l")) { const i = bank["hand_l"], h = 150, w = h * (i.naturalWidth / i.naturalHeight); ctx.drawImage(i, lx - w / 2, ly - h / 2, w, h); }
+  else handShape(lx, ly, -1);
+  if (imgReady("hand_r")) { const i = bank["hand_r"], h = 150, w = h * (i.naturalWidth / i.naturalHeight); ctx.drawImage(i, rx - w / 2, ly - h / 2, w, h); }
+  else handShape(rx, ly, 1);
+}
+function handShape(x, y, dir) {
+  ctx.fillStyle = "#e8b48c"; ctx.strokeStyle = "#c8946c"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(x, y, 24, 52, dir * 0.22, 0, 6.28); ctx.fill(); ctx.stroke();
+  // 親指
+  ctx.beginPath(); ctx.ellipse(x - dir * 14, y - 30, 9, 22, dir * 0.5, 0, 6.28); ctx.fill(); ctx.stroke();
+}
+
+function drawVignette() {
+  const g = ctx.createRadialGradient(W / 2, H * 0.42, H * 0.2, W / 2, H * 0.42, H * 0.7);
+  g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.38)");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
 }
 
 function drawHUD() {
-  // ハート
-  for (let i = 0; i < MAX_HP; i++) {
-    const hx = 18 + i * 30, hy = 22;
-    heart(hx, hy, 11, i < hp ? "#ff4d6d" : "rgba(255,255,255,0.18)");
-  }
-  // スコア
-  ctx.fillStyle = "#fff";
-  ctx.font = "bold 22px sans-serif";
-  ctx.textAlign = "right";
-  ctx.fillText(Math.floor(score).toString(), W - 16, 30);
-  ctx.textAlign = "left";
+  for (let i = 0; i < MAX_HP; i++) heart(18 + i * 30, 22, 11, i < hp ? "#ff4d6d" : "rgba(255,255,255,0.18)");
+  ctx.fillStyle = "#fff"; ctx.font = "bold 22px sans-serif"; ctx.textAlign = "right";
+  ctx.fillText(Math.floor(score).toString(), W - 16, 30); ctx.textAlign = "left";
 }
 
 function drawTitle() {
   overlay();
-  ctx.fillStyle = "#fff";
-  ctx.textAlign = "center";
-  ctx.font = "bold 30px sans-serif";
-  ctx.fillText("歩きスマホゲーム", W / 2, H * 0.30);
-  ctx.font = "16px sans-serif";
-  ctx.fillStyle = "#ffd76a";
-  ctx.fillText("スマホと移動を同時にこなせ！", W / 2, H * 0.30 + 32);
-
-  ctx.fillStyle = "#fff";
-  ctx.font = "15px sans-serif";
-  const lines = [
+  ctx.textAlign = "center"; ctx.fillStyle = "#fff"; ctx.font = "bold 30px sans-serif";
+  ctx.fillText("歩きスマホゲーム", W / 2, H * 0.26);
+  ctx.font = "16px sans-serif"; ctx.fillStyle = "#ffd76a";
+  ctx.fillText("スマホと移動を同時にこなせ！", W / 2, H * 0.26 + 30);
+  ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif";
+  [
     "▼ スマホ画面をタップ → ジャンプで敵を避ける",
-    "▼ 道の左右をタップ → 歩行者を左右によける",
+    "▼ スマホの外側を左右タップ → 歩行者をよける",
     "（キーボード: ←→ で移動 / Space でジャンプ）",
     "",
-    "両方ミスらず長く生き残れ！"
-  ];
-  lines.forEach((t, i) => ctx.fillText(t, W / 2, H * 0.46 + i * 26));
-
-  ctx.font = "bold 20px sans-serif";
-  ctx.fillStyle = (Math.floor(time * 2) % 2) ? "#fff" : "#7fd0ff";
-  ctx.fillText("タップ / Space でスタート", W / 2, H * 0.78);
+    "近づく歩行者は画面の隙間に見える。",
+    "前を見ながらスマホもこなせ！"
+  ].forEach((t, i) => ctx.fillText(t, W / 2, H * 0.44 + i * 26));
+  ctx.font = "bold 20px sans-serif"; ctx.fillStyle = (Math.floor(time * 2) % 2) ? "#fff" : "#7fd0ff";
+  ctx.fillText("タップ / Space でスタート", W / 2, H * 0.82);
   ctx.textAlign = "left";
 }
-
 function drawGameOver() {
   overlay();
-  ctx.fillStyle = "#fff";
-  ctx.textAlign = "center";
-  ctx.font = "bold 34px sans-serif";
-  ctx.fillText("ゲームオーバー", W / 2, H * 0.36);
-  ctx.font = "20px sans-serif";
-  ctx.fillText("スコア", W / 2, H * 0.46);
-  ctx.font = "bold 40px sans-serif";
-  ctx.fillStyle = "#ffd76a";
-  ctx.fillText(Math.floor(score).toString(), W / 2, H * 0.52);
-  ctx.fillStyle = "#fff";
-  ctx.font = "16px sans-serif";
-  ctx.fillText("生存 " + time.toFixed(1) + " 秒", W / 2, H * 0.57);
-  ctx.font = "bold 20px sans-serif";
-  ctx.fillStyle = (Math.floor(time * 2) % 2) ? "#fff" : "#7fd0ff";
-  ctx.fillText("タップ / Space でリトライ", W / 2, H * 0.70);
+  ctx.textAlign = "center"; ctx.fillStyle = "#fff"; ctx.font = "bold 34px sans-serif";
+  ctx.fillText("ゲームオーバー", W / 2, H * 0.34);
+  ctx.font = "20px sans-serif"; ctx.fillText("スコア", W / 2, H * 0.44);
+  ctx.font = "bold 40px sans-serif"; ctx.fillStyle = "#ffd76a"; ctx.fillText(Math.floor(score).toString(), W / 2, H * 0.50);
+  ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText("生存 " + time.toFixed(1) + " 秒", W / 2, H * 0.55);
+  ctx.font = "bold 20px sans-serif"; ctx.fillStyle = (Math.floor(time * 2) % 2) ? "#fff" : "#7fd0ff";
+  ctx.fillText("タップ / Space でリトライ", W / 2, H * 0.68);
   ctx.textAlign = "left";
 }
-
-function overlay() {
-  ctx.fillStyle = "rgba(10,10,20,0.72)";
-  ctx.fillRect(0, 0, W, H);
-}
+function overlay() { ctx.fillStyle = "rgba(10,10,20,0.74)"; ctx.fillRect(0, 0, W, H); }
 
 // ====== 図形ユーティリティ ======
-function roundRect(x, y, w, h, r) {
+function roundRectP(x, y, w, h, r) {
   r = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 function heart(cx, cy, s, color) {
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.moveTo(cx, cy + s * 0.3);
+  ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(cx, cy + s * 0.3);
   ctx.bezierCurveTo(cx, cy - s * 0.3, cx - s, cy - s * 0.5, cx - s, cy + s * 0.05);
   ctx.bezierCurveTo(cx - s, cy + s * 0.5, cx, cy + s * 0.7, cx, cy + s);
   ctx.bezierCurveTo(cx, cy + s * 0.7, cx + s, cy + s * 0.5, cx + s, cy + s * 0.05);
-  ctx.bezierCurveTo(cx + s, cy - s * 0.5, cx, cy - s * 0.3, cx, cy + s * 0.3);
-  ctx.fill();
+  ctx.bezierCurveTo(cx + s, cy - s * 0.5, cx, cy - s * 0.3, cx, cy + s * 0.3); ctx.fill();
 }
 function cloud(cx, cy, r) {
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.arc(cx + r, cy + 2, r * 0.8, 0, Math.PI * 2);
-  ctx.arc(cx - r, cy + 2, r * 0.8, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, 6.28); ctx.arc(cx + r, cy + 2, r * 0.8, 0, 6.28); ctx.arc(cx - r, cy + 2, r * 0.8, 0, 6.28); ctx.fill();
 }
 
-// ====== メインループ ======
+// ====== ループ＆リサイズ ======
 let lastT = performance.now();
 function loop(now) {
-  let dt = (now - lastT) / 1000;
-  lastT = now;
-  if (dt > 0.05) dt = 0.05; // タブ復帰などのジャンプ防止
-  update(dt);
-  draw();
+  let dt = (now - lastT) / 1000; lastT = now;
+  if (dt > 0.05) dt = 0.05;
+  update(dt); draw();
   requestAnimationFrame(loop);
 }
-
-// ====== リサイズ（縦横比維持で画面にフィット） ======
 function resize() {
-  const dpr = window.devicePixelRatio || 1;
-  const aspect = W / H;
+  const dpr = window.devicePixelRatio || 1, aspect = W / H;
   let cw = window.innerWidth, ch = window.innerHeight;
   if (cw / ch > aspect) cw = ch * aspect; else ch = cw / aspect;
-  canvas.style.width = cw + "px";
-  canvas.style.height = ch + "px";
-  canvas.width = Math.round(W * dpr);
-  canvas.height = Math.round(H * dpr);
+  canvas.style.width = cw + "px"; canvas.style.height = ch + "px";
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 window.addEventListener("resize", resize);
