@@ -41,18 +41,19 @@ PHONE.bottom = PHONE.y + PHONE.h;        // ≈734
 const SCREEN = { x: PHONE.x + 16, y: PHONE.y + 50, w: PHONE.w - 32, h: PHONE.h - 100 };
 const SCREEN_GROUND = SCREEN.y + SCREEN.h - 30;
 
-// リトライボタン（ゲームオーバー時）
-const RETRY_BTN = { x: W / 2 - 95, y: Math.round(H * 0.60), w: 190, h: 54 };
-const RETRY_DELAY = 1.3;                  // 結果を見る時間（誤タップ防止）
+// リトライボタン（ゲームオーバー時。待機なし＝ボタンを押した時だけ再開）
+const RETRY_BTN = { x: W / 2 - 95, y: Math.round(H * 0.66), w: 190, h: 54 };
 
 // ====== 一人称・ほぼフラットな近接視界 ======
 // 「スマホ注視時の視界」に寄せる：パースを弱め、足元から見え、上から下へスライド。
+// 当たり判定は「目の前に大きく迫った瞬間」になるよう、近接で大きく・低く描く。
 const GAP_TOP   = 22;                      // 視界上端
-const FOOT_FAR  = 46;                      // 出現時の足元Y（上）
-const FOOT_NEAR = PHONE.y + 18;            // 接近(衝突)時の足元Y（下）≈218
-const SPREAD_FAR = 138, SPREAD_NEAR = 160; // レーン間隔（差を小さく＝フラット）
-const SCALE_FAR  = 0.84, SCALE_NEAR = 1.06;// サイズ変化を小さく
+const FOOT_FAR  = 70;                      // 出現時の足元Y（上・小さい）
+const FOOT_NEAR = 440;                     // 接近(衝突)時の足元Y（下・目の前まで迫る）
+const SPREAD_FAR = 120, SPREAD_NEAR = 180; // レーン間隔
+const SCALE_FAR  = 0.70, SCALE_NEAR = 1.85;// 近接で大きく迫る
 const PED_H = 190;                         // 歩行者の基準身長
+const PED_HIT_PROG = 0.92;                 // この接近度＝大きく迫った瞬間に衝突
 function laneSpread(p) { return SPREAD_FAR + (SPREAD_NEAR - SPREAD_FAR) * p; }
 function projY(p) { return FOOT_FAR + (FOOT_NEAR - FOOT_FAR) * p; }
 function projX(absLane, p, camLane) { return W / 2 + (absLane - camLane) * laneSpread(p); }
@@ -84,21 +85,23 @@ function sprite(key, cx, footY, h, fallback) {
 }
 
 // ====== ゲーム状態 ======
-let gameState = "title", time = 0, speed = BASE_SPEED, score = 0, goElapsed = 0;
+let gameState = "title", time = 0, speed = BASE_SPEED, score = 0;
 const MAX_HP = 3; let hp = MAX_HP;
 
 const player = { lane: 1, laneF: 1, pedInvuln: 0 };
 let pedestrians = [], pedSpawnTimer = 0;
 const runner = { y: SCREEN_GROUND, vy: 0, onGround: true, invuln: 0, runPhase: 0 };
 let phoneEnemies = [], phoneSpawnTimer = 0;
-let hitFlash = 0;
+// 演出: 被弾フラッシュ・ヒットストップ・画面揺れ・ヒットエフェクト
+let hitFlash = 0, hitStop = 0, shake = 0, hitEffect = null;
 
 function resetGame() {
-  time = 0; speed = BASE_SPEED; score = 0; hp = MAX_HP; goElapsed = 0;
+  time = 0; speed = BASE_SPEED; score = 0; hp = MAX_HP;
   player.lane = 1; player.laneF = 1; player.pedInvuln = 0;
   pedestrians = []; pedSpawnTimer = 0.7;
   runner.y = SCREEN_GROUND; runner.vy = 0; runner.onGround = true; runner.invuln = 0; runner.runPhase = 0;
-  phoneEnemies = []; phoneSpawnTimer = 1.0; hitFlash = 0;
+  phoneEnemies = []; phoneSpawnTimer = 1.0;
+  hitFlash = 0; hitStop = 0; shake = 0; hitEffect = null;
 }
 
 // ====== 入力 ======
@@ -109,16 +112,15 @@ function jump() { if (runner.onGround) { runner.vy = JUMP_V; runner.onGround = f
 function handlePress(cx, cy) {
   if (gameState === "title") { resetGame(); gameState = "playing"; return; }
   if (gameState === "gameover") {
-    if (goElapsed < RETRY_DELAY) return;                       // まず結果を見る
+    // ボタンを押した時だけ再開（ジャンプ位置のタップでは再開しない）。待機なし。
     if (cx >= RETRY_BTN.x && cx <= RETRY_BTN.x + RETRY_BTN.w &&
         cy >= RETRY_BTN.y && cy <= RETRY_BTN.y + RETRY_BTN.h) { resetGame(); gameState = "playing"; }
-    return;                                                    // ボタン以外は無反応（ジャンプ位置でも再開しない）
+    return;
   }
-  // playing
-  const inPhone = cx >= PHONE.x && cx <= PHONE.x + PHONE.w && cy >= PHONE.y && cy <= PHONE.bottom;
-  if (inPhone) jump();                          // 枠の内側＝ジャンプ
-  else if (cx < W / 2) moveLeft();              // 枠の外・左
-  else moveRight();                             // 枠の外・右
+  // playing: 左の隙間＝左移動／右の隙間＝右移動／中央の縦帯（画面下中央含む）＝ジャンプ
+  if (cx < PHONE.x) moveLeft();
+  else if (cx > PHONE.x + PHONE.w) moveRight();
+  else jump();
 }
 function toLogical(clientX, clientY) {
   const r = canvas.getBoundingClientRect();
@@ -136,8 +138,8 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (gameState === "gameover") {
-    // リトライは Enter のみ＋待機後（ジャンプのSpace連打で即再開しないように）
-    if (e.code === "Enter" && goElapsed >= RETRY_DELAY) { resetGame(); gameState = "playing"; e.preventDefault(); }
+    // リトライは Enter のみ（ジャンプのSpace連打で即再開しないように）
+    if (e.code === "Enter") { resetGame(); gameState = "playing"; e.preventDefault(); }
     return;
   }
   switch (e.code) {
@@ -147,22 +149,29 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-function takeHit(src) {
-  hp--; hitFlash = 0.35;
+function takeHit(src, x, y) {
+  hp--; hitFlash = 0.3; hitStop = 0.13; shake = 11;
+  hitEffect = { t: 0.7, src, x, y, color: src === "ped" ? "#ff5a3c" : "#ff2e6e" };
   if (src === "ped") player.pedInvuln = INVULN; else runner.invuln = INVULN;
-  if (hp <= 0) { hp = 0; gameState = "gameover"; goElapsed = 0; }
+  if (hp <= 0) { hp = 0; gameState = "gameover"; }
+}
+
+// 毎フレーム必ず減衰させる演出タイマー（ヒットストップ中も進める）
+function decayFx(rdt) {
+  if (hitStop > 0) hitStop -= rdt;
+  if (shake > 0) shake = Math.max(0, shake - rdt * 70);
+  if (hitFlash > 0) hitFlash -= rdt;
+  if (hitEffect) { hitEffect.t -= rdt; if (hitEffect.t <= 0) hitEffect = null; }
 }
 
 // ====== 更新 ======
 function update(dt) {
-  if (gameState === "gameover") { goElapsed += dt; return; }
   if (gameState !== "playing") return;
   time += dt;
   speed = BASE_SPEED + time * SPEED_RAMP;
   score += dt * 100 * speed;
   if (player.pedInvuln > 0) player.pedInvuln -= dt;
   if (runner.invuln > 0) runner.invuln -= dt;
-  if (hitFlash > 0) hitFlash -= dt;
 
   player.laneF += (player.lane - player.laneF) * Math.min(1, dt / LANE_MOVE_T);
 
@@ -175,9 +184,12 @@ function update(dt) {
   const pedSpeed = 0.40 * speed;
   for (const p of pedestrians) {
     p.prog += pedSpeed * dt;
-    if (!p.hit && p.prog >= 0.86 && p.lane === player.lane && player.pedInvuln <= 0) { p.hit = true; takeHit("ped"); }
+    if (!p.hit && p.prog >= PED_HIT_PROG && p.lane === player.lane && player.pedInvuln <= 0) {
+      p.hit = true;
+      takeHit("ped", projX(p.lane, p.prog, player.laneF), projY(p.prog) - PED_H * pedScale(p.prog) * 0.5);
+    }
   }
-  pedestrians = pedestrians.filter(p => p.prog < 1.2);
+  pedestrians = pedestrians.filter(p => p.prog < 1.25);
 
   // スマホ内ランナー
   runner.runPhase += dt * 12 * speed;
@@ -196,7 +208,7 @@ function update(dt) {
   for (const en of phoneEnemies) {
     en.x -= enemySpeed * dt;
     if (!en.hit && Math.abs(en.x - runnerX) < 20 && runner.y > SCREEN_GROUND - en.h && runner.invuln <= 0) {
-      en.hit = true; takeHit("phone");
+      en.hit = true; takeHit("phone", runnerX, SCREEN_GROUND - 14);
     }
   }
   phoneEnemies = phoneEnemies.filter(en => en.x > SCREEN.x - 30);
@@ -213,12 +225,16 @@ const PED_COLORS = ["#d96a5a", "#5a8fd9", "#6ab86a", "#c79a3e", "#a96ad9", "#d96
 // ====== 描画 ======
 function draw() {
   ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
   drawWorld();        // 路面（見下ろし・ほぼフラット）
-  drawPedestrians();  // 歩行者（スマホの背後・足元から上→下へ）
-  drawPhone();        // スマホ本体＋中のゲーム＋手（前面）
+  drawPhone();        // スマホ本体＋中のゲーム＋手
+  drawPedestrians();  // 歩行者は前面に：迫ると画面を覆う＝当たる瞬間が分かる
   drawVignette();
+  drawHitEffect();    // 被弾エフェクト（どっちでミスったか）
+  ctx.restore();
   drawHUD();
-  if (hitFlash > 0) { ctx.fillStyle = `rgba(255,40,40,${0.4 * (hitFlash / 0.35)})`; ctx.fillRect(0, 0, W, H); }
+  if (hitFlash > 0) { ctx.fillStyle = `rgba(255,40,40,${0.32 * (hitFlash / 0.3)})`; ctx.fillRect(0, 0, W, H); }
   if (gameState === "title") drawTitle();
   else if (gameState === "gameover") drawGameOver();
 }
@@ -344,6 +360,40 @@ function handShape(x, y, dir) {
   ctx.beginPath(); ctx.ellipse(x - dir * 14, y - 30, 9, 22, dir * 0.5, 0, 6.28); ctx.fill(); ctx.stroke();
 }
 
+function drawHitEffect() {
+  if (!hitEffect) return;
+  const e = hitEffect, k = 1 - e.t / 0.7;            // 0→1 で進行
+  const a = Math.max(0, 1 - k);
+  // スマホ被弾なら画面を赤く（タスクBでミスと分かる）
+  if (e.src === "phone") {
+    ctx.save(); roundRectP(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h, 10); ctx.clip();
+    ctx.fillStyle = `rgba(255,40,90,${0.5 * a})`; ctx.fillRect(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h);
+    ctx.restore();
+  }
+  // 発生源に拡大リング＋バースト
+  const R = 12 + k * 70;
+  ctx.save();
+  ctx.globalAlpha = a; ctx.strokeStyle = e.color; ctx.lineWidth = 7 * (1 - k);
+  ctx.beginPath(); ctx.arc(e.x, e.y, R, 0, 6.28); ctx.stroke();
+  for (let i = 0; i < 8; i++) {
+    const ang = i / 8 * 6.28;
+    ctx.beginPath();
+    ctx.moveTo(e.x + Math.cos(ang) * R * 0.7, e.y + Math.sin(ang) * R * 0.7);
+    ctx.lineTo(e.x + Math.cos(ang) * R * 1.25, e.y + Math.sin(ang) * R * 1.25);
+    ctx.stroke();
+  }
+  ctx.restore();
+  // ラベル（どっちでミスったか）。上部バナーで常に読める位置に
+  if (e.t > 0.18) {
+    ctx.save();
+    ctx.textAlign = "center"; ctx.font = "bold 23px sans-serif";
+    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,0.6)";
+    const label = e.src === "ped" ? "歩行者にぶつかった！" : "スマホでミス！";
+    ctx.strokeText(label, W / 2, 70); ctx.fillStyle = e.color; ctx.fillText(label, W / 2, 70);
+    ctx.restore();
+  }
+}
+
 function drawVignette() {
   const g = ctx.createRadialGradient(W / 2, H * 0.42, H * 0.2, W / 2, H * 0.42, H * 0.7);
   g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.36)");
@@ -384,18 +434,15 @@ function drawGameOver() {
   ctx.font = "bold 42px sans-serif"; ctx.fillStyle = "#ffd76a"; ctx.fillText(Math.floor(score).toString(), W / 2, H * 0.46);
   ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText("生存 " + time.toFixed(1) + " 秒", W / 2, H * 0.51);
 
-  // リトライボタン（待機後に有効。誤タップ＝即リスタートを防止）
-  const ready = goElapsed >= RETRY_DELAY;
-  ctx.fillStyle = ready ? "#2e7fff" : "rgba(255,255,255,0.14)";
+  // リトライボタン（ボタンを押した時だけ再開）
+  ctx.fillStyle = "#2e7fff";
   roundRectP(RETRY_BTN.x, RETRY_BTN.y, RETRY_BTN.w, RETRY_BTN.h, 12); ctx.fill();
-  if (ready) {
-    ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 2;
-    roundRectP(RETRY_BTN.x, RETRY_BTN.y, RETRY_BTN.w, RETRY_BTN.h, 12); ctx.stroke();
-  }
-  ctx.fillStyle = ready ? "#fff" : "rgba(255,255,255,0.5)";
-  ctx.font = "bold 20px sans-serif";
-  ctx.fillText(ready ? "リトライ" : "結果を確認…", W / 2, RETRY_BTN.y + 35);
-  if (ready) { ctx.font = "12px sans-serif"; ctx.fillStyle = "rgba(255,255,255,0.7)"; ctx.fillText("タップ / Enter", W / 2, RETRY_BTN.y + RETRY_BTN.h + 18); }
+  ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 2;
+  roundRectP(RETRY_BTN.x, RETRY_BTN.y, RETRY_BTN.w, RETRY_BTN.h, 12); ctx.stroke();
+  ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif";
+  ctx.fillText("リトライ", W / 2, RETRY_BTN.y + 35);
+  ctx.font = "12px sans-serif"; ctx.fillStyle = "rgba(255,255,255,0.7)";
+  ctx.fillText("タップ / Enter", W / 2, RETRY_BTN.y + RETRY_BTN.h + 18);
   ctx.textAlign = "left";
 }
 
@@ -422,9 +469,11 @@ function cloud(cx, cy, r) {
 // ====== ループ＆リサイズ ======
 let lastT = performance.now();
 function loop(now) {
-  let dt = (now - lastT) / 1000; lastT = now;
-  if (dt > 0.05) dt = 0.05;
-  update(dt); draw();
+  let rdt = (now - lastT) / 1000; lastT = now;
+  if (rdt > 0.05) rdt = 0.05;
+  decayFx(rdt);                       // 演出は常に進める
+  update(hitStop > 0 ? 0 : rdt);      // ヒットストップ中はゲームを止める
+  draw();
   requestAnimationFrame(loop);
 }
 function resize() {
