@@ -60,10 +60,13 @@ function projX(absLane, p, camLane) { return W / 2 + (absLane - camLane) * laneS
 function pedScale(p) { return SCALE_FAR + (SCALE_NEAR - SCALE_FAR) * p; }
 
 // ====== チューニング ======
-const BASE_SPEED = 1.0, SPEED_RAMP = 0.018;
+const BASE_SPEED = 1.0, SPEED_RAMP = 0.018, SPEED_MAX = 2.5;  // 全体速度は頭打ち
+const PHONE_SPEED_CAP = 1.7;   // スマホ側は物理的に回避可能な上限で頭打ち（ジャンプ滞空≈0.6s）
 const PED_SPAWN_BASE = 1.35, PHONE_SPAWN_BASE = 1.55;
+const PHONE_SPAWN_MIN = 0.7;   // 連続ジャンプが間に合う最小間隔
 const INVULN = 1.0, LANE_MOVE_T = 0.12;
 const GRAVITY = 2600, JUMP_V = -780;
+function phoneSpd() { return Math.min(speed, PHONE_SPEED_CAP); }
 
 // ====== アセット差し替え層（assets/ にPNGを置けば自動使用、無ければ図形） ======
 const ASSET_MANIFEST = [
@@ -88,7 +91,6 @@ function sprite(key, cx, footY, h, fallback) {
 let gameState = "title", time = 0, speed = BASE_SPEED, score = 0;
 const MAX_HP = 3; let hp = MAX_HP;
 let best = +(localStorage.getItem("arukisumaho_best") || 0), newRecord = false;
-let countdown = 0;          // 開始カウントダウン秒
 let combo = 0;              // 連続回避コンボ
 let popups = [];            // 得点ポップ {x,y,t,vy,text,color}
 
@@ -101,7 +103,7 @@ let hitFlash = 0, hitStop = 0, shake = 0, hitEffect = null;
 
 function resetGame() {
   time = 0; speed = BASE_SPEED; score = 0; hp = MAX_HP; newRecord = false;
-  countdown = 3; combo = 0; popups = [];
+  combo = 0; popups = [];
   player.lane = 1; player.laneF = 1; player.pedInvuln = 0;
   pedestrians = []; pedSpawnTimer = 0.7;
   runner.y = SCREEN_GROUND; runner.vy = 0; runner.onGround = true; runner.invuln = 0; runner.runPhase = 0;
@@ -115,9 +117,9 @@ function moveRight() { if (player.lane < 2) player.lane++; }
 function jump() { if (runner.onGround) { runner.vy = JUMP_V; runner.onGround = false; } else { jumpBuffer = 0.13; } }
 function onSuccess(x, y) {
   combo++;
-  const bonus = 5 * Math.min(combo, 10);
+  const bonus = 2 * Math.min(combo, 10);
   score += bonus;
-  popups.push({ x, y, t: 0.7, vy: -34, text: "+" + bonus, color: combo >= 5 ? "#ffd24a" : "#9affb0" });
+  popups.push({ x, y, t: 0.7, vy: -34, text: "+" + bonus + "m", color: combo >= 5 ? "#ffd24a" : "#9affb0" });
 }
 
 function handlePress(cx, cy) {
@@ -184,12 +186,10 @@ function decayFx(rdt) {
 function update(dt) {
   if (gameState !== "playing") return;
   player.laneF += (player.lane - player.laneF) * Math.min(1, dt / LANE_MOVE_T);
-  // 開始カウントダウン中は脅威を止めて構える時間を作る
-  if (countdown > 0) { countdown -= dt; return; }
 
   time += dt;
-  speed = BASE_SPEED + time * SPEED_RAMP;
-  score += dt * 100 * speed;
+  speed = Math.min(BASE_SPEED + time * SPEED_RAMP, SPEED_MAX);
+  score += dt * speed * 12;   // 「歩きスマホ距離(m)」として加算
   if (player.pedInvuln > 0) player.pedInvuln -= dt;
   if (runner.invuln > 0) runner.invuln -= dt;
   if (jumpBuffer > 0) jumpBuffer -= dt;
@@ -227,10 +227,10 @@ function update(dt) {
   // スマホ内の敵
   phoneSpawnTimer -= dt;
   if (phoneSpawnTimer <= 0) {
-    phoneSpawnTimer = Math.max(0.55, PHONE_SPAWN_BASE / speed) * (0.7 + Math.random() * 0.7);
+    phoneSpawnTimer = Math.max(PHONE_SPAWN_MIN, (PHONE_SPAWN_BASE / phoneSpd()) * (0.7 + Math.random() * 0.6));
     phoneEnemies.push({ x: SCREEN.x + SCREEN.w + 20, h: 20 + Math.random() * 14, hit: false, cleared: false });
   }
-  const enemySpeed = (150 + 40 * speed) * speed;
+  const enemySpeed = (150 + 40 * phoneSpd()) * phoneSpd();
   const runnerX = SCREEN.x + SCREEN.w * 0.28;
   for (const en of phoneEnemies) {
     en.x -= enemySpeed * dt;
@@ -265,7 +265,6 @@ function draw() {
   ctx.restore();
   drawHUD();
   if (hitFlash > 0) { ctx.fillStyle = `rgba(255,40,40,${0.32 * (hitFlash / 0.3)})`; ctx.fillRect(0, 0, W, H); }
-  if (gameState === "playing" && countdown > 0) drawCountdown();
   if (gameState === "title") drawTitle();
   else if (gameState === "gameover") drawGameOver();
 }
@@ -280,16 +279,14 @@ function drawPopups() {
   ctx.globalAlpha = 1; ctx.textAlign = "left";
 }
 
-function drawCountdown() {
-  const n = Math.ceil(countdown);
-  ctx.textAlign = "center";
-  ctx.fillStyle = "rgba(0,0,0,0.25)"; ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = "#fff"; ctx.font = "bold 90px sans-serif";
-  const txt = countdown < 0.6 ? "GO!" : String(n);
-  const scale = 1 + (1 - (countdown % 1)) * 0.3;
-  ctx.save(); ctx.translate(W / 2, H * 0.32); ctx.scale(scale, scale);
-  ctx.lineWidth = 5; ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.strokeText(txt, 0, 0); ctx.fillText(txt, 0, 0);
-  ctx.restore(); ctx.textAlign = "left";
+// スコア(=距離m)に応じた歩きスマホ称号とひとこと
+function rankFor(d) {
+  if (d < 500)  return { title: "歩きスマホ見習い", msg: "スマホしまって前見て歩け！", color: "#ff5a5a" };
+  if (d < 1000) return { title: "歩きスマホ初心者", msg: "電柱とぶつかるタイプ", color: "#ff9e4a" };
+  if (d < 1800) return { title: "歩きスマホ中級者", msg: "マルチタスク苦手そう", color: "#ffd24a" };
+  if (d < 2800) return { title: "歩きスマホ上級者", msg: "相手が避けてくれてるだけですよ", color: "#9affb0" };
+  if (d < 4000) return { title: "歩きスマホマスター", msg: "そこまでしてスマホしたいか？", color: "#7fd0ff" };
+  return { title: "歩きスマホの神", msg: "もうおまえは歩きスマホしていいよ", color: "#e0a3ff" };
 }
 
 function drawWorld() {
@@ -386,7 +383,7 @@ function drawPhoneGame() {
   ctx.fillStyle = "#6dbf4a"; ctx.fillRect(SCREEN.x, SCREEN_GROUND + 2, SCREEN.w, SCREEN.y + SCREEN.h - SCREEN_GROUND);
   ctx.fillStyle = "#4f9e36"; ctx.fillRect(SCREEN.x, SCREEN_GROUND + 2, SCREEN.w, 4);
   ctx.fillStyle = "rgba(0,0,0,0.08)";
-  const gs = (time * (150 + 40 * speed) * speed) % 30;
+  const gs = (time * (150 + 40 * phoneSpd()) * phoneSpd()) % 30;
   for (let x = SCREEN.x - gs; x < SCREEN.x + SCREEN.w; x += 30) ctx.fillRect(x, SCREEN_GROUND + 6, 14, 3);
   for (const en of phoneEnemies) {
     sprite("enemy", en.x, SCREEN_GROUND, en.h, () => {
@@ -462,8 +459,8 @@ function drawVignette() {
 function drawHUD() {
   for (let i = 0; i < MAX_HP; i++) heart(18 + i * 30, 22, 11, i < hp ? "#ff4d6d" : "rgba(255,255,255,0.18)");
   ctx.fillStyle = "#fff"; ctx.font = "bold 22px sans-serif"; ctx.textAlign = "right";
-  ctx.fillText(Math.floor(score).toString(), W - 16, 30);
-  ctx.font = "11px sans-serif"; ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.fillText("BEST " + best, W - 16, 44);
+  ctx.fillText(Math.floor(score) + " m", W - 16, 30);
+  ctx.font = "11px sans-serif"; ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.fillText("BEST " + best + "m", W - 16, 44);
   if (combo > 1) { ctx.textAlign = "center"; ctx.font = "bold 16px sans-serif"; ctx.fillStyle = "#ffd24a"; ctx.fillText("コンボ x" + combo, W / 2, 28); }
   ctx.textAlign = "left";
 }
@@ -483,7 +480,7 @@ function drawTitle() {
     "歩行者は足元から、ふいに近づく。",
     "下を向いていても前に気を配れ！"
   ].forEach((t, i) => ctx.fillText(t, W / 2, H * 0.44 + i * 26));
-  if (best > 0) { ctx.font = "14px sans-serif"; ctx.fillStyle = "#ffd76a"; ctx.fillText("ベスト " + best, W / 2, H * 0.74); }
+  if (best > 0) { ctx.font = "14px sans-serif"; ctx.fillStyle = "#ffd76a"; ctx.fillText("ベスト " + best + " m", W / 2, H * 0.74); }
   ctx.font = "bold 20px sans-serif"; ctx.fillStyle = (Math.floor(time * 2) % 2) ? "#fff" : "#7fd0ff";
   ctx.fillText("タップ / Space でスタート", W / 2, H * 0.82);
   ctx.textAlign = "left";
@@ -491,13 +488,19 @@ function drawTitle() {
 
 function drawGameOver() {
   overlay();
-  ctx.textAlign = "center"; ctx.fillStyle = "#fff"; ctx.font = "bold 34px sans-serif";
-  ctx.fillText("ゲームオーバー", W / 2, H * 0.30);
-  ctx.font = "18px sans-serif"; ctx.fillText("スコア", W / 2, H * 0.40);
-  ctx.font = "bold 42px sans-serif"; ctx.fillStyle = "#ffd76a"; ctx.fillText(Math.floor(score).toString(), W / 2, H * 0.46);
-  ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText("生存 " + time.toFixed(1) + " 秒", W / 2, H * 0.51);
-  if (newRecord) { ctx.fillStyle = "#ffd24a"; ctx.font = "bold 18px sans-serif"; ctx.fillText("★ 新記録！ ★", W / 2, H * 0.565); }
-  else { ctx.fillStyle = "rgba(255,255,255,0.7)"; ctx.font = "14px sans-serif"; ctx.fillText("ベスト " + best, W / 2, H * 0.565); }
+  const d = Math.floor(score), rank = rankFor(d);
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#fff"; ctx.font = "bold 28px sans-serif"; ctx.fillText("ゲームオーバー", W / 2, H * 0.20);
+  // 称号
+  ctx.fillStyle = rank.color; ctx.font = "bold 30px sans-serif"; ctx.fillText("「" + rank.title + "」", W / 2, H * 0.30);
+  // 距離
+  ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.font = "15px sans-serif"; ctx.fillText("歩きスマホ距離", W / 2, H * 0.37);
+  ctx.fillStyle = "#ffd76a"; ctx.font = "bold 44px sans-serif"; ctx.fillText(d + " m", W / 2, H * 0.435);
+  // ひとこと（称号に応じた説教/ねぎらい）
+  ctx.fillStyle = rank.color; ctx.font = "bold 17px sans-serif"; ctx.fillText(rank.msg, W / 2, H * 0.495);
+  // ベスト / 新記録
+  if (newRecord) { ctx.fillStyle = "#ffd24a"; ctx.font = "bold 18px sans-serif"; ctx.fillText("★ 新記録！ ★", W / 2, H * 0.55); }
+  else { ctx.fillStyle = "rgba(255,255,255,0.7)"; ctx.font = "14px sans-serif"; ctx.fillText("ベスト " + best + " m", W / 2, H * 0.55); }
 
   // リトライボタン（ボタンを押した時だけ再開）
   ctx.fillStyle = "#2e7fff";
