@@ -61,9 +61,9 @@ function pedScale(p) { return SCALE_FAR + (SCALE_NEAR - SCALE_FAR) * p; }
 
 // ====== チューニング ======
 const BASE_SPEED = 1.0, SPEED_RAMP = 0.018, SPEED_MAX = 2.5;  // 全体速度は頭打ち
-const PHONE_SPEED_CAP = 1.7;   // スマホ側は物理的に回避可能な上限で頭打ち（ジャンプ滞空≈0.6s）
-const PED_SPAWN_BASE = 1.35, PHONE_SPAWN_BASE = 1.55;
-const PHONE_SPAWN_MIN = 0.7;   // 連続ジャンプが間に合う最小間隔
+const PHONE_SPEED_CAP = 1.35;  // スマホ側の上限速度（同時処理でも捌けるよう低めに頭打ち。ジャンプ滞空≈0.6s）
+const PED_SPAWN_BASE = 1.35, PHONE_SPAWN_BASE = 1.8;
+const PHONE_SPAWN_MIN = 0.9;   // 連続ジャンプ＋反応が間に合う最小間隔
 const INVULN = 1.0, LANE_MOVE_T = 0.12;
 const GRAVITY = 2600, JUMP_V = -780;
 function phoneSpd() { return Math.min(speed, PHONE_SPEED_CAP); }
@@ -282,7 +282,7 @@ function drawPopups() {
 // スコア(=距離m)に応じた歩きスマホ称号とひとこと
 function rankFor(d) {
   if (d < 500)  return { title: "歩きスマホ見習い", msg: "スマホしまって前見て歩け！", color: "#ff5a5a" };
-  if (d < 1000) return { title: "歩きスマホ初心者", msg: "電柱とぶつかるタイプ", color: "#ff9e4a" };
+  if (d < 1000) return { title: "歩きスマホ初心者", msg: "電柱とぶつかるタイプでしょ", color: "#ff9e4a" };
   if (d < 1800) return { title: "歩きスマホ中級者", msg: "マルチタスク苦手そう", color: "#ffd24a" };
   if (d < 2800) return { title: "歩きスマホ上級者", msg: "相手が避けてくれてるだけですよ", color: "#9affb0" };
   if (d < 4000) return { title: "歩きスマホマスター", msg: "そこまでしてスマホしたいか？", color: "#7fd0ff" };
